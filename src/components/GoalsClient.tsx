@@ -10,6 +10,29 @@ interface Goal {
   target_amount: number | null; current_amount: number
   target_date: string | null; category: string
   status: 'active' | 'completed' | 'paused'
+  currency: string
+}
+
+const CURRENCY_SYMBOLS: Record<string, string> = {
+  GHS: 'GH₵', USD: '$', EUR: '€', GBP: '£', NGN: '₦', KES: 'KSh', ZAR: 'R', XOF: 'CFA',
+}
+
+function fmtAmt(amount: number, currency: string) {
+  const sym = CURRENCY_SYMBOLS[currency] ?? currency
+  if (amount >= 1_000_000) return `${sym}${(amount / 1_000_000).toFixed(1)}M`
+  if (amount >= 1_000) return `${sym}${(amount / 1_000).toFixed(1)}K`
+  return `${sym}${amount.toLocaleString()}`
+}
+
+function quickAmounts(target: number, current: number): number[] {
+  const remaining = Math.max(0, target - current)
+  const candidates = [
+    Math.ceil(target * 0.1),
+    Math.ceil(target * 0.25),
+    Math.ceil(target * 0.5),
+    remaining,
+  ]
+  return [...new Set(candidates)].filter(a => a > 0).slice(0, 4)
 }
 interface Profile { millionaire_goal: number; current_net_worth: number }
 
@@ -27,7 +50,8 @@ export default function GoalsClient({ initialGoals, profile, userId }: {
   const [goals, setGoals] = useState<Goal[]>(initialGoals)
   const [showForm, setShowForm] = useState(false)
   const [updating, setUpdating] = useState<string | null>(null)
-  const [form, setForm] = useState({ title: '', description: '', target_amount: '', current_amount: '', category: 'financial', target_date: '' })
+  const [logInputs, setLogInputs] = useState<Record<string, string>>({})
+  const [form, setForm] = useState({ title: '', description: '', target_amount: '', current_amount: '', category: 'financial', target_date: '', currency: 'GHS' })
 
   const supabase = createClient()
   const netWorth = profile?.current_net_worth ?? 0
@@ -39,12 +63,13 @@ export default function GoalsClient({ initialGoals, profile, userId }: {
     const { data, error } = await supabase.from('goals').insert({
       user_id: userId, title: form.title.trim(), description: form.description || null,
       target_amount: form.target_amount ? parseInt(form.target_amount) : null,
-      current_amount: parseInt(form.current_amount) || 0,
+      current_amount: 0,
       category: form.category, target_date: form.target_date || null,
+      currency: form.currency,
     }).select().single()
     if (!error && data) {
       setGoals(prev => [data, ...prev])
-      setForm({ title: '', description: '', target_amount: '', current_amount: '', category: 'financial', target_date: '' })
+      setForm({ title: '', description: '', target_amount: '', current_amount: '', category: 'financial', target_date: '', currency: 'GHS' })
       setShowForm(false)
     }
   }
@@ -55,6 +80,13 @@ export default function GoalsClient({ initialGoals, profile, userId }: {
     await supabase.from('goals').update({ current_amount: newAmount }).eq('id', goal.id)
     setGoals(prev => prev.map(g => g.id === goal.id ? { ...g, current_amount: newAmount } : g))
     setUpdating(null)
+  }
+
+  async function logProgress(goal: Goal) {
+    const val = parseFloat(logInputs[goal.id] ?? '')
+    if (!val || isNaN(val) || val <= 0) return
+    await updateProgress(goal, val)
+    setLogInputs(prev => ({ ...prev, [goal.id]: '' }))
   }
 
   async function markCompleted(id: string) {
@@ -93,14 +125,25 @@ export default function GoalsClient({ initialGoals, profile, userId }: {
             className="w-full px-3 py-2.5 rounded-xl bg-white/5 border border-white/10 text-white text-sm focus:outline-none" />
         </div>
         <div>
-          <label className="block text-xs text-gray-500 mb-1.5 uppercase tracking-wider">Target ($)</label>
+          <label className="block text-xs text-gray-500 mb-1.5 uppercase tracking-wider">Target ({form.currency})</label>
           <input type="number" value={form.target_amount} onChange={e => setForm(f => ({ ...f, target_amount: e.target.value }))}
             placeholder="10000" className="w-full px-3 py-2.5 rounded-xl bg-white/5 border border-white/10 text-white text-sm focus:outline-none" />
         </div>
         <div>
-          <label className="block text-xs text-gray-500 mb-1.5 uppercase tracking-wider">Current ($)</label>
-          <input type="number" value={form.current_amount} onChange={e => setForm(f => ({ ...f, current_amount: e.target.value }))}
-            placeholder="0" className="w-full px-3 py-2.5 rounded-xl bg-white/5 border border-white/10 text-white text-sm focus:outline-none" />
+          <label className="block text-xs text-gray-500 mb-1.5 uppercase tracking-wider">Currency</label>
+          <select value={form.currency} onChange={e => setForm(f => ({ ...f, currency: e.target.value }))}
+            className="w-full px-3 py-2.5 rounded-xl bg-white/5 border border-white/10 text-white text-sm focus:outline-none">
+            {[
+              { code: 'GHS', label: 'GH₵ — Ghanaian Cedi' },
+              { code: 'USD', label: '$ — US Dollar' },
+              { code: 'EUR', label: '€ — Euro' },
+              { code: 'GBP', label: '£ — British Pound' },
+              { code: 'NGN', label: '₦ — Nigerian Naira' },
+              { code: 'KES', label: 'KSh — Kenyan Shilling' },
+              { code: 'ZAR', label: 'R — South African Rand' },
+              { code: 'XOF', label: 'CFA — West African Franc' },
+            ].map(c => <option key={c.code} value={c.code}>{c.label}</option>)}
+          </select>
         </div>
       </div>
       <button onClick={addGoal} className="w-full py-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-sm transition-all">
@@ -201,23 +244,34 @@ export default function GoalsClient({ initialGoals, profile, userId }: {
               {goal.target_amount !== null && (
                 <>
                   <div className="flex items-center justify-between mb-2 text-sm">
-                    <span className="text-gray-300">{formatCurrency(goal.current_amount)}</span>
+                    <span className="text-gray-300">{fmtAmt(goal.current_amount, goal.currency)}</span>
                     <span className="font-bold text-white">{pct.toFixed(0)}%</span>
-                    <span className="text-gray-500">{formatCurrency(goal.target_amount)}</span>
+                    <span className="text-gray-500">{fmtAmt(goal.target_amount, goal.currency)}</span>
                   </div>
                   <div className="h-2 bg-white/5 rounded-full overflow-hidden mb-3">
                     <div className={cn('h-full rounded-full transition-all', catConfig.color.replace('text-', 'bg-'))}
                       style={{ width: `${Math.max(pct, 1)}%` }} />
                   </div>
-                  {/* Quick update buttons — wrap on mobile */}
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <span className="text-xs text-gray-600">Quick:</span>
-                    {[100, 500, 1000, 5000].map(amt => (
-                      <button key={amt} onClick={() => updateProgress(goal, amt)} disabled={updating === goal.id}
-                        className="text-xs px-2.5 py-1.5 rounded-lg bg-white/5 hover:bg-indigo-500/20 text-gray-400 hover:text-indigo-300 transition-all touch-manipulation">
-                        +{formatCurrency(amt)}
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-gray-600 shrink-0">Log:</span>
+                    <div className="flex items-center gap-1.5 flex-1">
+                      <span className="text-xs text-gray-500 shrink-0">{CURRENCY_SYMBOLS[goal.currency] ?? goal.currency}</span>
+                      <input
+                        type="number"
+                        min="0"
+                        value={logInputs[goal.id] ?? ''}
+                        onChange={e => setLogInputs(prev => ({ ...prev, [goal.id]: e.target.value }))}
+                        onKeyDown={e => e.key === 'Enter' && logProgress(goal)}
+                        placeholder="amount earned today"
+                        className="flex-1 min-w-0 px-2.5 py-1.5 rounded-lg bg-white/5 border border-white/10 text-white text-xs placeholder-gray-700 focus:outline-none focus:border-indigo-500 touch-manipulation"
+                      />
+                      <button
+                        onClick={() => logProgress(goal)}
+                        disabled={updating === goal.id || !logInputs[goal.id]}
+                        className="shrink-0 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-30 text-white text-xs font-bold transition-all touch-manipulation">
+                        {updating === goal.id ? '…' : '+Add'}
                       </button>
-                    ))}
+                    </div>
                   </div>
                 </>
               )}
